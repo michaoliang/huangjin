@@ -967,7 +967,11 @@ class GoldAnalyzerApp:
         self.tv.set(tf)
         if hasattr(self, '_initialized') and self._initialized:
             self._signal()
-            self._chart_m1(); self._chart_h1()
+            # 只在数据变化时才重绘图表，减少卡顿
+            if not hasattr(self, '_last_chart_time') or (datetime.now().timestamp() - self._last_chart_time) > 5:
+                self._chart_m1()
+                self._chart_h1()
+                self._last_chart_time = datetime.now().timestamp()
         # 更新按钮样式
         periods = ['M1','M5','M6','M15','M30','H1','H4','D1']
         for j, btn in enumerate(self.period_btns):
@@ -989,6 +993,7 @@ class GoldAnalyzerApp:
             self.root.after(REFRESH_MS, self._refresh)
             return
         try:
+            # 优化：减少不必要的tick调用，只在需要时获取
             for sym, name in MT5Engine.SYMBOLS.items():
                 t = self.anz.tick(sym)
                 if t:
@@ -1014,7 +1019,11 @@ class GoldAnalyzerApp:
                         self.daily_lbls[sym].config(fg=dco)
             self._signal()
             self._account()
-            self._chart_m1(); self._chart_h1()
+            # 只在数据变化时才重绘图表，减少卡顿
+            if not hasattr(self, '_last_chart_time') or (datetime.now().timestamp() - self._last_chart_time) > 5:
+                self._chart_m1()
+                self._chart_h1()
+                self._last_chart_time = datetime.now().timestamp()
             self._check_alerts()
             if self.auto_on: self._auto_trade_step()
             self._check_ea_status()
@@ -1052,9 +1061,33 @@ class GoldAnalyzerApp:
         self._start_countdown_timer()
     
     def _start_countdown_timer(self):
-        """启动倒计时定时器 - 每秒更新"""
+        """启动倒计时定时器 - 每秒更新，但只在实际变化时更新标题"""
         self._update_countdown()
         self.root.after(1000, self._start_countdown_timer)
+
+    def _update_countdown(self):
+        """更新周期倒计时 - 优化版，减少不必要的标题更新"""
+        try:
+            now = datetime.now()
+            m1_tf = getattr(self, "chart_tv_m1", None)
+            h1_tf = getattr(self, "chart_tv_h1", None)
+            m1_tf = m1_tf.get() if m1_tf else "M1"
+            h1_tf = h1_tf.get() if h1_tf else "H1"
+            period_secs = {"M1": 60, "M5": 300, "M6": 360, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14400, "D1": 86400}
+            m1_secs = period_secs.get(m1_tf, 60)
+            h1_secs = period_secs.get(h1_tf, 3600)
+            epoch = now.timestamp()
+            m1_rem = int(m1_secs - (epoch % m1_secs))
+            h1_rem = int(h1_secs - (epoch % h1_secs))
+            m1_str = f"{m1_rem//60:02d}:{m1_rem%60:02d}"
+            h1_str = f"{h1_rem//60:02d}:{h1_rem%60:02d}"
+            # 只在实际变化时更新标题，减少重绘
+            new_title = f"HJ ANALYZER v3.071 - M1:{m1_str} H1:{h1_str}"
+            if self.root.title() != new_title:
+                self.root.title(new_title)
+            self.countdown_var.set(m1_str)
+        except Exception as e:
+            _dbg(f"_update_countdown error: {e}")
 
     def _check_ea_status(self):
         """检查EA状态"""
@@ -1402,41 +1435,59 @@ class GoldAnalyzerApp:
         try:
             i = self.anz.account()
             if not i: return
-            for k, short in [("balance","bal"),("equity","eq"),("margin","mg"),("free","free")]:
-                self.avars[short].set("${:,.2f}".format(i[k]))
-            p = i["profit"]
-            profit_str = "${:+,.2f}".format(p)
-            self.avars["prof"].set(profit_str)
-            # 盈亏颜色：盈利绿色，亏损红色
-            if p >= 0:
-                self.prof_lbl.config(fg=self.C["green"])
-            else:
-                self.prof_lbl.config(fg=self.C["red"])
-            pos = mt5.positions_get(symbol="XAUUSDc")
-            ps = list(pos) if pos is not None and len(pos) > 0 else []
-            txt = ""
-            if ps:
-                tick = mt5.symbol_info_tick("XAUUSDc")
-                if tick:
-                    for p in ps:
-                        d = "SELL" if p.type == mt5.POSITION_TYPE_SELL else "BUY"
-                        pnl = (tick.bid - p.price_open) * p.volume * 100 if p.type == mt5.POSITION_TYPE_BUY else (p.price_open - tick.bid) * p.volume * 100
-                        st = "盈" if pnl >= 0 else "亏"
-                        txt += f"{d} {p.volume:.2f}@{p.price_open:.2f} {st}${abs(pnl):.0f}\n"
+            # 只在数值变化时更新UI
+            bal = '\$' + '{:,.2f}'.format(i['balance'])
+            if getattr(self, '_last_bal', None) != bal:
+                self.avars['bal'].set(bal)
+                self._last_bal = bal
+            eq = '\$' + '{:,.2f}'.format(i['equity'])
+            if getattr(self, '_last_eq', None) != eq:
+                self.avars['eq'].set(eq)
+                self._last_eq = eq
+            mg = '\$' + '{:,.2f}'.format(i['margin'])
+            if getattr(self, '_last_mg', None) != mg:
+                self.avars['mg'].set(mg)
+                self._last_mg = mg
+            free = '\$' + '{:,.2f}'.format(i['free'])
+            if getattr(self, '_last_free', None) != free:
+                self.avars['free'].set(free)
+                self._last_free = free
+            p = i['profit']
+            prof = '\$' + '{:+,.2f}'.format(p)
+            if getattr(self, '_last_prof', None) != prof:
+                self.avars['prof'].set(prof)
+                self._last_prof = prof
+                self.prof_lbl.config(fg=self.C['green'] if p >= 0 else self.C['red'])
+            # 持仓每2秒更新一次
+            now = datetime.now().timestamp()
+            if not hasattr(self, '_last_pos_time') or (now - self._last_pos_time) > 2:
+                self._last_pos_time = now
+                pos = mt5.positions_get(symbol='XAUUSDc')
+                ps = list(pos) if pos is not None and len(pos) > 0 else []
+                txt = ''
+                if ps:
+                    tick = mt5.symbol_info_tick('XAUUSDc')
+                    if tick:
+                        for p in ps:
+                            d = 'SELL' if p.type == mt5.POSITION_TYPE_SELL else 'BUY'
+                            pnl = (tick.bid - p.price_open) * p.volume * 100 if p.type == mt5.POSITION_TYPE_BUY else (p.price_open - tick.bid) * p.volume * 100
+                            st = '盈' if pnl >= 0 else '亏'
+                            txt += f'{d} {p.volume:.2f}@{p.price_open:.2f} {st}\
+'
+                    else:
+                        txt = '行情数据获取失败'
                 else:
-                    txt = "行情数据获取失败"
-            else:
-                txt = "无持仓"
-            self.pt.config(state="normal")
-            self.pt.delete("1.0", "end")
-            self.pt.insert("1.0", txt)
-            self.pt.config(state="disabled")
-            
+                    txt = '无持仓'
+                self.pt.config(state='normal')
+                self.pt.delete('1.0', 'end')
+                self.pt.insert('1.0', txt)
+                self.pt.config(state='disabled')
+
         except Exception as e:
-            self.pt.config(state="normal")
-            self.pt.delete("1.0", "end")
-            self.pt.insert("1.0", "持仓获取错误: " + str(e))
-            self.pt.config(state="disabled")
+            self.pt.config(state='normal')
+            self.pt.delete('1.0', 'end')
+            self.pt.insert('1.0', '持仓获取错误: ' + str(e))
+            self.pt.config(state='disabled')
 
     def _chart(self):
         self.countdown_annot = None  # 重置倒计时标注
