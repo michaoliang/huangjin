@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-黄金分析助手 v3.059 - 完整版
+黄金分析助手 v3.071 - 完整版
 功能：实时行情、信号分析、自动交易、EA控制、价格预警、历史回测
 """
 import MetaTrader5 as mt5
@@ -60,7 +60,7 @@ AUTO_RSI_SELL = int(_cfg.get('AutoTrade', 'rsi_sell', fallback='70'))
 AUTO_MAX_POS = int(_cfg.get('AutoTrade', 'max_positions', fallback='3'))
 WINDOW_WIDTH = int(_cfg.get('Window', 'width', fallback='1920'))
 WINDOW_HEIGHT = int(_cfg.get('Window', 'height', fallback='1080'))
-REFRESH_MS = int(_cfg.get('Display', 'refresh_interval_ms', fallback='3000'))
+REFRESH_MS = int(_cfg.get('Display', 'refresh_interval_ms', fallback='1000'))
 COUNTDOWN_MS = 1000  # 倒计时更新频率
 ALERT_PCT = float(_cfg.get('Alerts', 'price_change_pct', fallback='1.0'))
 ALERT_CD = int(_cfg.get('Alerts', 'cooldown_sec', fallback='120'))
@@ -75,9 +75,16 @@ class MT5Engine:
               'M30':mt5.TIMEFRAME_M30,'H1':mt5.TIMEFRAME_H1,'H4':mt5.TIMEFRAME_H4,'D1':mt5.TIMEFRAME_D1}
 
     def __init__(self):
-        self.ok = mt5.initialize()
+        self.ok = False
         self._connecting = False
         self._sym_digits = {}
+        # 尝试连接但不强制初始化
+        try:
+            acc = mt5.account_info()
+            if acc:
+                self.ok = True
+        except:
+            pass
 
     def shutdown(self):
         if self.ok: mt5.shutdown()
@@ -216,18 +223,43 @@ class MT5Engine:
                 'bb':bb,'atr':atr,'atr_hist':atr_hist,'atr_pct':ap,'vol':vl,'signals':sig,'overall':ov,
                 'bs':bs,'ss':ss,'res':res,'sup':sup,'closes':c,'rates':r}
     def connect(self):
+        """连接MT5 - 只在未连接时初始化，避免影响登录缓存"""
         if getattr(self, "_connecting", False): return
+        if self.ok: return  # 已连接则不重复初始化
         self._connecting = True
         try:
-            self.ok = mt5.initialize()
-            if self.ok:
+            # 先尝试获取账户信息，如果成功说明已连接
+            acc = mt5.account_info()
+            if acc:
+                self.ok = True
+                self._connecting = False
                 for sym in self.SYMBOLS:
                     si = mt5.symbol_info(sym)
                     if si:
                         self._sym_digits[sym] = si.digits if hasattr(si, "digits") else 2
-                self._connecting = False
-        except Exception:
+                return
+            # 未连接时才尝试初始化，带超时保护
+            import threading
+            result = [None]
+            def _init_thread():
+                result[0] = mt5.initialize(path=TERMINAL_PATH)
+            t = threading.Thread(target=_init_thread, daemon=True)
+            t.start()
+            t.join(timeout=8)
+            if t.is_alive():
+                self.ok = False
+                _dbg("MT5 init timeout")
+            else:
+                self.ok = result[0]
+                if self.ok:
+                    for sym in self.SYMBOLS:
+                        si = mt5.symbol_info(sym)
+                        if si:
+                            self._sym_digits[sym] = si.digits if hasattr(si, "digits") else 2
             self._connecting = False
+        except Exception as e:
+            self._connecting = False
+            _dbg(f'connect error: {e}')
 
     def prev_close(self, sym):
         try:
@@ -319,7 +351,7 @@ class AlertSystem:
 class GoldAnalyzerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("黄金分析助手 v3.059")
+        self.root.title("黄金分析助手 v3.071")
         self.stop = False
         self.auto_on = False
         self.ea_status_var = tk.StringVar(value='未部署')
@@ -384,13 +416,41 @@ class GoldAnalyzerApp:
 
     def _build_ui(self):
         self.root.configure(bg=self.C["bg"])
-        self.root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
+        # 读取保存的窗口位置和大小
+        try:
+            import configparser as _cfg_mod
+            _cfg_w = _cfg_mod.ConfigParser()
+            _cfg_w.read(r'E:\MySoftware\黄金分析工具_Portable\config.ini', encoding='utf-8')
+            _win_w = int(_cfg_w.get('Window', 'width', fallback=str(WINDOW_WIDTH)))
+            _win_h = int(_cfg_w.get('Window', 'height', fallback=str(WINDOW_HEIGHT)))
+            _win_x = _cfg_w.get('Window', 'x', fallback='center')
+            _win_y = _cfg_w.get('Window', 'y', fallback='center')
+        except:
+            _win_w, _win_h = WINDOW_WIDTH, WINDOW_HEIGHT
+            _win_x, _win_y = 'center', 'center'
+        
+        self.root.geometry(f'{_win_w}x{_win_h}')
         self.root.update_idletasks()
+        # 居中或恢复保存的位置
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        self.root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}+{(sw-WINDOW_WIDTH)//2}+{(sh-WINDOW_HEIGHT)//2}")
+        if _win_x == 'center':
+            x_pos = (sw - _win_w) // 2
+        else:
+            x_pos = max(0, min(int(_win_x), sw - _win_w))
+        if _win_y == 'center':
+            y_pos = max(20, (sh - _win_h) // 2)
+        else:
+            y_pos = max(20, min(int(_win_y), sh - _win_h - 40))
+        self.root.geometry(f'{_win_w}x{_win_h}+{x_pos}+{y_pos}')
+        # 保存位置到配置
+        try:
+            _cfg_w.set('Window', 'x', str(x_pos))
+            _cfg_w.set('Window', 'y', str(y_pos))
+            _cfg_w.write(open(r'E:\MySoftware\黄金分析工具_Portable\config.ini', 'w', encoding='utf-8'))
+        except: pass
         tf = tk.Frame(self.root, bg=self.C["bg"])
         tf.pack(fill="x", padx=20, pady=(10, 5))
-        tk.Label(tf, text="\u26a1 HJ ANALYZER  v3.059 \u26a1", font=("Consolas", 14, "bold"),
+        tk.Label(tf, text="\u26a1 HJ ANALYZER  v3.071 \u26a1", font=("Consolas", 14, "bold"),
                  fg=self.C["accent"], bg=self.C["bg"]).pack(side="left")
         self.conn_lbl = tk.Label(tf, textvariable=self.conn_var, font=("Consolas", 8, "bold"),
                  fg=self.C["green"], bg=self.C["bg"])
@@ -434,6 +494,14 @@ class GoldAnalyzerApp:
         
         # 右侧折叠面板
         self._build_right_panels()
+        self.root.after(100, self._fix_right_scroll)
+    
+    def _fix_right_scroll(self):
+        """修复右侧滚动区域"""
+        try:
+            self.right_canvas.configure(scrollregion=self.right_canvas.bbox('all'))
+        except:
+            pass
 
     def _panel_prices(self, parent):
         f = self._frame(parent, "实时行情")
@@ -555,7 +623,7 @@ class GoldAnalyzerApp:
         for opt in ['M1','M5','M6','M15','M30','H1','H4','D1']:
             tk.Button(tf, text='▸'+opt, font=('Consolas', 8, 'bold'), fg=self.C['accent'], bg=self.C['card'], highlightthickness=1, highlightcolor=self.C['bd'],
                       activebackground=self.C['accent'], relief='flat', cursor='hand2',
-                      command=lambda o=opt: self.chart_tv.set(o) or self.tv.set(o) or self._chart_m1(); self._chart_h1() or self._signal()).pack(side='left', padx=4)
+                      command=lambda o=opt: self.chart_tv.set(o) or self.tv.set(o) or (self._chart_m1(), self._chart_h1(), self._signal())[-1]).pack(side='left', padx=4)
         self.fig = Figure(figsize=(12, 14), facecolor=self.C['card'])
         self.canvas = FigureCanvasTkAgg(self.fig, master=f)
         self.canvas.get_tk_widget().pack(fill='both', expand=True)
@@ -757,6 +825,7 @@ class GoldAnalyzerApp:
         self._panel_indicators(self.bottom_content)
         self._panel_alerts(self.bottom_content)
         self._panel_auto_trade(self.bottom_content)
+        self._panel_settings(self.bottom_content)
 
     def _toggle_top(self):
         if self.top_content.winfo_ismapped():
@@ -946,7 +1015,6 @@ class GoldAnalyzerApp:
             self._signal()
             self._account()
             self._chart_m1(); self._chart_h1()
-            self._update_countdown()
             self._check_alerts()
             if self.auto_on: self._auto_trade_step()
             self._check_ea_status()
@@ -981,6 +1049,21 @@ class GoldAnalyzerApp:
                 t = self.anz.tick(sym)
                 if t: self._prev[sym] = t.bid
         self._target(); self._refresh()
+        self._start_countdown_timer()
+    
+    def _start_countdown_timer(self):
+        """启动倒计时定时器 - 每秒更新"""
+        self._update_countdown()
+        self.root.after(1000, self._start_countdown_timer)
+
+    def _check_ea_status(self):
+        """检查EA状态"""
+        try:
+            status = "未部署"
+            if hasattr(self, "ea_status_var"):
+                self.ea_status_var.set(status)
+        except:
+            pass
 
     def _close(self):
         self.stop = True; self.anz.shutdown(); self.root.destroy()
@@ -1031,6 +1114,17 @@ class GoldAnalyzerApp:
         self.alert_list.pack(fill="both", expand=True, padx=8, pady=(0,5))
         self.alert_list.insert(0, "XAUUSDc 黄金  预警阈值 1.0%")
 
+    def _add_alert(self):
+        """添加价格预警"""
+        try:
+            pct = float(self.alert_pct.get())
+            sym = "XAUUSDc"
+            name = "黄金"
+            self.alert_list.insert(tk.END, f"{sym} {name} 预警阈值 {pct:.1f}%")
+            self.alert_list.see(tk.END)
+        except:
+            pass
+
     def _panel_auto_trade(self, parent):
         f = self._frame(parent, "自动交易")
         tf = tk.Frame(f, bg=self.C["card"]); tf.pack(fill="x", padx=8)
@@ -1053,6 +1147,26 @@ class GoldAnalyzerApp:
         self.auto_log = tk.Text(f, height=5, font=("Consolas", 9), fg=self.C["tx"], bg=self.C["card"], relief="flat", state="disabled")
         self.auto_log.pack(fill="both", expand=True, padx=8, pady=(4,0))
 
+    def _toggle_auto(self):
+        """切换自动交易开关"""
+        self.auto_on = self.auto_on_var.get()
+        if self.auto_on:
+            self.auto_status_var.set("运行中")
+            self._log_auto("自动交易已开启")
+        else:
+            self.auto_status_var.set("已停止")
+            self._log_auto("自动交易已关闭")
+
+    def _log_auto(self, msg):
+        """记录自动交易日志"""
+        try:
+            self.auto_log.config(state='normal')
+            self.auto_log.insert(tk.END, msg + "\n")
+            self.auto_log.see(tk.END)
+            self.auto_log.config(state='disabled')
+        except:
+            pass
+
     def _panel_ea(self, parent):
         f = self._frame(parent, "EA控制")
         ptf = tk.Frame(f, bg=self.C['card']); ptf.pack(fill='x', padx=8, pady=(4,0))
@@ -1074,6 +1188,92 @@ class GoldAnalyzerApp:
         tk.Label(inf, text='INFO 1.选择MT5路径 -> 2.编译部署 -> 3.打开MT5 -> 4.拖EA到图表 -> 5.勾选允许算法交易',
                  font=('Consolas', 8), fg=self.C['dim'], bg=self.C['card'], wraplength=500).pack(anchor='w')
         self._check_ea_status()
+
+
+    def _panel_settings(self, parent):
+        """设置面板"""
+        f = self._frame(parent, "设置")
+        # MT5连接设置
+        stf = tk.Frame(f, bg=self.C['card']); stf.pack(fill='x', padx=8, pady=(4,0))
+        tk.Label(stf, text='MT5终端:', font=('Consolas', 9), fg=self.C['dim'], bg=self.C['card']).pack(side='left', padx=(0,4))
+        self.settings_mt5_path_var = tk.StringVar(value=r'D:\\MetaTrader 5 EXNESS')
+        tk.Entry(stf, textvariable=self.settings_mt5_path_var, font=('Consolas', 9),
+                 bg=self.C['bg'], fg=self.C['tx'], relief='flat', width=40).pack(side='left', fill='x', expand=True, padx=(0,4))
+        tk.Button(stf, text='选择', command=self._select_mt5_path,
+                  bg=self.C['card'], fg=self.C['accent'], font=('Consolas', 9),
+                  cursor='hand2', relief='flat').pack(side='left', padx=4)
+        tk.Button(stf, text='重连', command=self._reconnect_mt5,
+                  bg=self.C['accent'], fg=self.C['bg'], font=('Consolas', 9, 'bold'),
+                  cursor='hand2', relief='flat', width=6).pack(side='left', padx=4)
+        # 连接状态
+        sf = tk.Frame(f, bg=self.C['card']); sf.pack(fill='x', padx=8, pady=(4,0))
+        tk.Label(sf, text='连接状态:', font=('Consolas', 9), fg=self.C['dim'], bg=self.C['card']).pack(side='left', padx=(0,8))
+        self.settings_conn_var = tk.StringVar(value='未连接')
+        tk.Label(sf, textvariable=self.settings_conn_var, font=('Consolas', 9), fg=self.C['yellow'], bg=self.C['card']).pack(side='left', padx=(0,15))
+        # 保存按钮
+        bf = tk.Frame(f, bg=self.C['card']); bf.pack(fill='x', padx=8, pady=4)
+        tk.Button(bf, text='保存设置', command=self._save_settings,
+                  bg=self.C['accent'], fg=self.C['bg'], font=('Consolas', 9, 'bold'),
+                  cursor='hand2', relief='flat', width=10).pack(side='left')
+        tk.Label(bf, text='提示: 修改路径后需点击重连', font=('Consolas', 8), fg=self.C['dim'], bg=self.C['card']).pack(side='left', padx=(10,0))
+
+    
+    def _select_mt5_path(self):
+        """选择MT5终端路径"""
+        from tkinter import filedialog
+        fpath = filedialog.askopenfilename(
+            title='选择MT5终端',
+            filetypes=[('EXE文件', '*.exe'), ('所有文件', '*.*')],
+            initialdir=r'D:\\'
+        )
+        if fpath:
+            dir_path = os.path.dirname(fpath)
+            self.settings_mt5_path_var.set(dir_path)
+            _dbg(f'Selected MT5 path: {dir_path}')
+
+    def _reconnect_mt5(self):
+        """重新连接MT5 - 使用线程避免阻塞UI，支持切换MT5终端"""
+        import threading
+        def _do_reconnect():
+            try:
+                mt5_path = self.settings_mt5_path_var.get()
+                self.anz.shutdown()
+                import time; time.sleep(1)
+                import MetaTrader5 as mt5_module
+                result = mt5_module.initialize(path=mt5_path)
+                def _update_ui():
+                    if result:
+                        self.anz.ok = True
+                        self.settings_conn_var.set('已连接')
+                        if hasattr(self, 'conn_lbl'):
+                            self.conn_lbl.config(fg=self.C['green'])
+                    else:
+                        self.settings_conn_var.set('连接失败')
+                        if hasattr(self, 'conn_lbl'):
+                            self.conn_lbl.config(fg=self.C['red'])
+                self.root.after(0, _update_ui)
+            except Exception as e:
+                def _update_err():
+                    self.settings_conn_var.set('错误')
+                    _dbg(f'_reconnect_mt5 error: {e}')
+                self.root.after(0, _update_err)
+        threading.Thread(target=_do_reconnect, daemon=True).start()
+        self.settings_conn_var.set('连接中...')
+
+    def _save_settings(self):
+        """保存设置到配置文件"""
+        try:
+            import configparser
+            config = configparser.ConfigParser()
+            config.read(r'E:\MySoftware\黄金分析工具_Portable\config.ini', encoding='utf-8')
+            if 'MT5' not in config:
+                config['MT5'] = {}
+            config['MT5']['terminal_path'] = self.settings_mt5_path_var.get()
+            config.write(open(r'E:\MySoftware\黄金分析工具_Portable\config.ini', 'w', encoding='utf-8'))
+            self.settings_conn_var.set('已保存')
+            _dbg('设置已保存')
+        except Exception as e:
+            _dbg(f'_save_settings error: {e}')
 
     def _signal(self):
         a = self.anz.analyze("XAUUSDc", self.tv.get())
@@ -1348,168 +1548,71 @@ class GoldAnalyzerApp:
         self.fig.subplots_adjust(hspace=1)
         self.canvas.draw()
     def _update_countdown(self):
-        """更新周期倒计时 - 每秒刷新"""
+        """更新周期倒计时 - 每秒刷新，显示在窗口标题"""
         try:
-            tf = self.tv.get()
-            if not tf: return
-            # 计算当前周期剩余时间
             now = datetime.now()
-            period_secs = {"M1": 60, "M5": 300, "M6": 360, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14400, "D1": 86400}.get(tf, 3600)
-            # 计算当前周期已过时间
+            m1_tf = getattr(self, "chart_tv_m1", None)
+            h1_tf = getattr(self, "chart_tv_h1", None)
+            m1_tf = m1_tf.get() if m1_tf else "M1"
+            h1_tf = h1_tf.get() if h1_tf else "H1"
+            period_secs = {"M1": 60, "M5": 300, "M6": 360, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14400, "D1": 86400}
+            m1_secs = period_secs.get(m1_tf, 60)
+            h1_secs = period_secs.get(h1_tf, 3600)
             epoch = now.timestamp()
-            elapsed = epoch % period_secs
-            remaining = int(period_secs - elapsed)
-            mins = remaining // 60
-            secs = remaining % 60
-            countdown_str = f"{mins:02d}:{secs:02d}"
-            self.countdown_var.set(countdown_str)
-            # 直接更新图表上的标注
-            if self.countdown_annot:
-                self.countdown_annot.set_text(f"倒计时: {countdown_str}")
-                self.canvas.draw_idle()
-        except:
-            pass
+            m1_rem = int(m1_secs - (epoch % m1_secs))
+            h1_rem = int(h1_secs - (epoch % h1_secs))
+            m1_str = f"{m1_rem//60:02d}:{m1_rem%60:02d}"
+            h1_str = f"{h1_rem//60:02d}:{h1_rem%60:02d}"
+            self.countdown_var.set(m1_str)
+            self.root.title(f"HJ ANALYZER v3.071 - M1:{m1_str} H1:{h1_str}")
+        except Exception as e:
+            _dbg(f"_update_countdown error: {e}")
 
-    def _select_mt5_path(self):
-        import tkinter.filedialog as fd
-        path = fd.askdirectory(title='选择MT5终端目录')
-        if path:
-            self.ea_mt5_path_var.set(path)
-            self._check_ea_status()
 
-    def _deploy_ea(self):
-        import subprocess, os, shutil
-        mt5_dir = self.ea_mt5_path_var.get()
-        src_ea = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'MQL5', 'Experts', 'GoldTrader_MTF_EA.mq5')
-        dst_ea = os.path.join(mt5_dir, 'MQL5', 'Experts', 'GoldTrader_MTF_EA.mq5')
-        if not os.path.exists(src_ea):
-            self.ea_status_var.set('源码不存在')
-            return
-        os.makedirs(os.path.dirname(dst_ea), exist_ok=True)
-        shutil.copy2(src_ea, dst_ea)
-        editor = os.path.join(mt5_dir, 'MetaEditor64.exe')
-        if os.path.exists(editor):
-            result = subprocess.run([editor, '/compile:' + dst_ea, '/log'], capture_output=True, text=True, timeout=120)
-            if result.returncode == 0 and '0 errors' in result.stdout:
-                self.ea_status_var.set('已部署(最新)')
-            else:
-                self.ea_status_var.set('编译失败')
-        else:
-            self.ea_status_var.set('未找到编译器')
 
-    def _check_ea_status(self):
-        ea_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'MQL5', 'Experts', 'GoldTrader_MTF_EA.ex5')
-        if os.path.exists(ea_file):
-            import time
-            age = time.time() - os.path.getmtime(ea_file)
-            if age < 3600:
-                self.ea_status_var.set('已部署(最新)')
-            else:
-                self.ea_status_var.set('已部署')
-        else:
-            self.ea_status_var.set('未部署')
-
-    def _toggle_auto(self):
-        self.auto_on = self.auto_on_var.get()
-        if self.auto_on:
-            self.auto_status_var.set("运行中"); self._auto_log("已开启自动交易")
-        else:
-            self.auto_status_var.set("已停止"); self._auto_log("已关闭自动交易")
-
-    def _auto_log(self, msg):
-        self.auto_log.config(state="normal")
-        self.auto_log.insert("end", f"{datetime.now().strftime('%H:%M:%S')} {msg}\n")
-        self.auto_log.see("end")
-        self.auto_log.config(state="disabled")
-
-    def _add_alert(self):
-        pct = self.alert_pct.get()
-        self.alert_list.insert("end", f"XAUUSDc 黄金  预警阈值 {pct:.1f}%")
-        self.alert_system.add("XAUUSDc", threshold_pct=pct)
-
-    def _run_backtest(self, tf_var):
-        tf = tf_var.get()
-        self.bt_result.config(state="normal"); self.bt_result.delete("1.0", "end")
-        self.bt_result.insert("1.0", "回测中..."); self.bt_result.config(state="disabled")
-        threading.Thread(target=self._do_backtest, args=(tf,), daemon=True).start()
-
-    def _do_backtest(self, tf):
-        r = self.anz.backtest("XAUUSDc", tf)
-        if r is None:
-            txt = "数据不足，无法回测"
-        else:
-            txt = f"周期: {tf} | 初始资金: ${r['initial_capital']:,.0f}\n"
-            txt += f"最终资金: ${r['final_capital']:,.0f}  收益: ${r['total_return']:+.2f}%\n"
-            txt += f"交易次数: {r['total_trades']} | 胜率: {r['win_rate']:.1f}%\n"
-            txt += f"盈亏比: {r['profit_factor']:.2f}"
-        self.bt_result.config(state="normal")
-        self.bt_result.delete("1.0", "end")
-        self.bt_result.insert("1.0", txt); self.bt_result.config(state="disabled")
-
-    def _quick_trade(self, action):
-        try:
-            lot = self.quick_lot_var.get()
-            sym = "XAUUSDc"
-            res = self.anz.order_send(sym, action, lot)
-            if res and res.retcode == 0:
-                co = self.C["red"] if action == "buy" else self.C["green"]
-                txt = f"{action.upper()} {lot}手 @ {sym}\n"
-                self.sd.config(state="normal")
-                self.sd.insert("end", txt)
-                self.sd.config(state="disabled", fg=co)
-            else:
-                err = res.error if res else "未知错误"
-                self._auto_log(f"交易失败: {err}")
-        except Exception as _e:
-            self._auto_log(f"交易错误: {str(_e)[:50]}")
-
-    def _auto_trade_step(self):
-        try:
-            if not self.auto_on: return
-            acc = self.anz.account()
-            if not acc: return
-            if acc["balance"] >= TARGET_BALANCE:
-                self.auto_on = False
-                self.auto_status_var.set("目标达成!")
-                self._auto_log(f"恭喜! 达到目标 ${TARGET_BALANCE:.0f}")
-                return
-            pos = self.anz.positions("XAUUSDc")
-            if pos and len(pos) >= AUTO_MAX_POS: return
-            h1 = self.anz.analyze("XAUUSDc", "H1")
-            m5 = self.anz.analyze("XAUUSDc", "M5")
-            tick = self.anz.tick("XAUUSDc")
-            if not h1 or not m5 or not tick: return
-            lot = self.auto_lot_var.get()
-            price = tick.bid
-            if h1["trend"] in ("强势上涨", "偏多") and m5["rsi"] < self.auto_rsi_buy_var.get():
-                has_buy = any(p.type == mt5.POSITION_TYPE_BUY for p in (pos or []))
-                if not has_buy:
-                    sl = price * 0.98
-                    tp = price * 1.04
-                    res = self.anz.order_send("XAUUSDc", "buy", lot, sl=sl, tp=tp)
-                    if res and res.retcode == 0:
-                        self._auto_log(f"买入 {lot}手 @{price:.2f}")
-            elif h1["trend"] in ("强势下跌", "偏空") and m5["rsi"] > self.auto_rsi_sell_var.get():
-                has_sell = any(p.type == mt5.POSITION_TYPE_SELL for p in (pos or []))
-                if not has_sell:
-                    sl = price * 1.02
-                    tp = price * 0.96
-                    res = self.anz.order_send("XAUUSDc", "sell", lot, sl=sl, tp=tp)
-                    if res and res.retcode == 0:
-                        self._auto_log(f"卖出 {lot}手 @{price:.2f}")
-            if pos:
-                for p in pos:
-                    pnl = (price - p.price_open) * p.volume * 100 if p.type == mt5.POSITION_TYPE_BUY else (p.price_open - price) * p.volume * 100
-                    if pnl > 50:
-                        close_act = "sell" if p.type == mt5.POSITION_TYPE_BUY else "buy"
-                        res = self.anz.order_send("XAUUSDc", close_act, p.volume)
-                        if res and res.retcode == 0:
-                            self._auto_log(f"止盈平仓 ${pnl:+.0f}")
-        except Exception:
-            pass
-
+def _kill_old_instances():
+    """启动前清理旧进程，避免缓存问题 - 使用taskkill强制关闭"""
+    import subprocess, time, os
+    try:
+        # 方法1: 使用taskkill关闭所有python.exe进程（除了当前进程）
+        current_pid = os.getpid()
+        result = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq python.exe', '/FO', 'CSV'], 
+                              capture_output=True, text=True, timeout=5)
+        pids_to_kill = []
+        for line in result.stdout.split('\n'):
+            if 'python.exe' in line.lower():
+                parts = line.strip().split(',')
+                if len(parts) >= 2:
+                    try:
+                        pid = int(parts[1].strip('"'))
+                        if pid != current_pid:
+                            pids_to_kill.append(pid)
+                    except: pass
+        # 强制关闭所有找到的进程
+        for pid in pids_to_kill:
+            try:
+                subprocess.run(['taskkill', '/F', '/PID', str(pid)], 
+                             capture_output=True, timeout=3)
+            except: pass
+        time.sleep(2)  # 等待进程完全退出
+        # 方法2: 再次检查，确保没有残留
+        result2 = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq python.exe', '/FO', 'CSV'], 
+                                capture_output=True, text=True, timeout=5)
+        for line in result2.stdout.split('\n'):
+            if 'python.exe' in line.lower():
+                parts = line.strip().split(',')
+                if len(parts) >= 2:
+                    try:
+                        pid = int(parts[1].strip('"'))
+                        if pid != os.getpid():
+                            subprocess.run(['taskkill', '/F', '/IM', 'python.exe'], 
+                                         capture_output=True, timeout=5)
+                            break
+                    except: pass
+    except: pass
 
 if __name__ == "__main__":
+    _kill_old_instances()
     root = tk.Tk()
     app = GoldAnalyzerApp(root)
     root.protocol("WM_DELETE_WINDOW", app._close)
