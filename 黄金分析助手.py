@@ -23,16 +23,28 @@ try:
 except ImportError:
     print('tkinter missing'); exit(1)
 
-try:
+# 自适应选择matplotlib后端：优先Qt5Agg(GPU加速)，回退TkAgg(CPU)
+def _setup_matplotlib_backend():
+    try:
+        import matplotlib
+        matplotlib.use('Qt5Agg')
+        from matplotlib.backends.backend_qt5agg import FigureCanvasTkAgg
+        print('使用 Qt5Agg 后端 (GPU加速)')
+        return FigureCanvasTkAgg
+    except ImportError:
+        pass
     import matplotlib
     matplotlib.use('TkAgg')
-    matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei']
-    matplotlib.rcParams['axes.unicode_minus'] = False
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    from matplotlib.figure import Figure
-    from matplotlib.patches import Rectangle
-except ImportError:
-    print('matplotlib not found'); exit(1)
+    print('使用 TkAgg 后端 (CPU渲染)')
+    return FigureCanvasTkAgg
+
+FigureCanvasTkAgg = _setup_matplotlib_backend()
+import matplotlib
+matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei']
+matplotlib.rcParams['axes.unicode_minus'] = False
+from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
 
 try:
     import winsound
